@@ -1,0 +1,4 @@
+matplotlib>=3.0.0
+streamlit>=1.0.0
+numpy>=1.0.0  # if you're using numpy
+pandas>=1.0.0  # if you're using pandas
