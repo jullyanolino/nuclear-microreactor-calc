@@ -1,6 +1,6 @@
 # streamlit_app.py
 # Streamlit app: MMR Offshore Decision Support (AHP + SAW + MonteCarlo + FPSO compatibility)
-# Author: gerado por ChatGPT sob pedido do usuário
+# Author: Jullyano Lino
 # Run: streamlit run streamlit_app.py
 
 import streamlit as st
@@ -237,6 +237,18 @@ with st.expander("Ver / editar dados de reatores"):
 
 
 # Build the score matrix (reactors x criteria)
+
+# ---------------------------
+# Build the score matrix (reactors x criteria)  -- REPLACEMENT ROBUSTO
+# ---------------------------
+
+# sanitize obvious string placeholders that came from editors
+df_mmr = df_mmr.replace({"None": np.nan, "none": np.nan, "NULL": np.nan, "NoneType": np.nan})
+
+# ensure name column exists
+if 'name' not in df_mmr.columns:
+    df_mmr['name'] = df_mmr['mmr'].fillna('Unknown')
+
 reactor_names = df_mmr['name'].fillna(df_mmr['mmr']).tolist()
 n_reactors = len(reactor_names)
 n_criteria = len(criteria)
@@ -245,50 +257,123 @@ n_criteria = len(criteria)
 scores_matrix = np.zeros((n_reactors, n_criteria))
 metric_info = []
 
-st.header("2) Defina notas / métricas por critério")
+st.header("2) Defina notas / métricas por critério (versão robusta)")
 cols_input = st.columns(2)
+
 for j, c in enumerate(criteria):
     with cols_input[j % 2]:
         st.subheader(c)
-        # if c corresponds to a numeric column in df_mmr, we will use that (and allow normalization)
-        if c in df_mmr.columns:
-            series = pd.to_numeric(df_mmr[c], errors='coerce').values.astype(float)
-            st.write("Dados detectados para critério '{}', valores extraídos da coluna.".format(c))
-            # user chooses if this is benefit (higher better) or cost (lower better)
-            benefit = st.checkbox(f"'{c}' é benefício (maior é melhor)?", value=True, key=f"benefit_{j}")
-            norm_method = st.selectbox(f"Normalização '{c}'", options=["minmax","zscore"], index=0, key=f"norm_{j}")
-            normed = normalize_series(series, method=norm_method, benefit=benefit)
-            scores_matrix[:, j] = normed
-            metric_info.append((c, True, norm_method))
+
+        # If the criterion is exactly 'LCOE' but our df uses 'LCOE_$perMWh', map it:
+        df_colname = c
+        if c.lower() in ['lcoe', 'lcoe_$permwh', 'lcoe_$permwh']:
+            if 'LCOE_$perMWh' in df_mmr.columns:
+                df_colname = 'LCOE_$perMWh'
+            elif 'LCOE' in df_mmr.columns:
+                df_colname = 'LCOE'
+
+        # If column exists in df_mmr, try to coerce to numeric and check
+        if df_colname in df_mmr.columns:
+            # coerce to numeric (safe), convert 'inf' strings, etc.
+            series_raw = df_mmr[df_colname].replace([None, ""], np.nan)
+            # try numeric coercion
+            series_num = pd.to_numeric(series_raw, errors='coerce').astype(float).values
+
+            # if the entire series is NaN -> ask user for subjective scores instead of leaving NaNs
+            if np.all(np.isnan(series_num)):
+                st.warning(f"A coluna '{df_colname}' existe mas está vazia. Insira notas subjetivas 0..10 para '{c}'.")
+                subj = []
+                for i, rname in enumerate(reactor_names):
+                    default = 5.0
+                    val = st.number_input(f"{rname} — {c} (col '{df_colname}' vazio)", min_value=0.0, max_value=10.0, value=float(default), step=0.5, key=f"subj_{j}_{i}")
+                    subj.append(val)
+                subj = np.array(subj, dtype=float)
+                normed = normalize_series(subj, method="minmax", benefit=True)
+                scores_matrix[:, j] = normed
+                metric_info.append((c, False, f"subjective_from_empty_column_{df_colname}"))
+            else:
+                # we have some numeric data -> normalize it
+                # ask user whether it's benefit or cost
+                benefit = st.checkbox(f"'{c}' é benefício (maior é melhor)?", value=True, key=f"benefit_{j}")
+                norm_method = st.selectbox(f"Normalização '{c}'", options=["minmax","zscore"], index=0, key=f"norm_{j}")
+                normed = normalize_series(series_num, method=norm_method, benefit=benefit)
+                # fill any remaining NaNs in normalized with column mean
+                if np.isnan(normed).any():
+                    col_mean = np.nanmean(normed)
+                    normed = np.where(np.isfinite(normed), normed, col_mean if np.isfinite(col_mean) else 0.0)
+                scores_matrix[:, j] = normed
+                metric_info.append((c, True, df_colname))
         else:
-            # ask user for subjective scores 0..10
-            st.write("Crie notas subjetivas (0..10) para cada reator para o critério '{}'.".format(c))
+            # column not present in dataframe: ask for subjective scores 0..10
+            st.write(f"Critério '{c}' não encontrado no dataset — insira notas subjetivas (0..10)." )
             subj = []
             for i, rname in enumerate(reactor_names):
-                default = 5
+                default = 5.0
                 val = st.number_input(f"{rname} — {c}", min_value=0.0, max_value=10.0, value=float(default), step=0.5, key=f"{j}_{i}")
                 subj.append(val)
             subj = np.array(subj, dtype=float)
-            normed = normalize_series(subj, method="minmax", benefit=True)  # assume benefit
+            normed = normalize_series(subj, method="minmax", benefit=True)
             scores_matrix[:, j] = normed
             metric_info.append((c, False, "subjective_0_10"))
 
-# LCOE special handling: if present, ensure treated as cost (lower better)
-if 'LCOE_$perMWh' in criteria:
+# Special handling for LCOE if present as a raw column name
+if 'LCOE_$perMWh' in df_mmr.columns and 'LCOE_$perMWh' in criteria:
     idx = criteria.index('LCOE_$perMWh')
-    # ensure it's cost
-    # already normalized above; if it was raw column, we re-normalize as cost
-    if 'LCOE_$perMWh' in df_mmr.columns:
-        series = pd.to_numeric(df_mmr['LCOE_$perMWh'], errors='coerce').values.astype(float)
+    series = pd.to_numeric(df_mmr['LCOE_$perMWh'], errors='coerce').astype(float).values
+    if np.all(np.isnan(series)):
+        st.warning("LCOE presente mas sem valores numéricos; verifique CAPEX/OPEX/P_rated/CF ou preencha manualmente.")
+    else:
         scores_matrix[:, idx] = normalize_series(series, method="minmax", benefit=False)
         metric_info[idx] = ('LCOE_$perMWh', True, 'minmax_cost')
 
-# Show normalized matrix summary
+# Final sanitation: ensure finite and in 0..1
+if not np.isfinite(scores_matrix).all():
+    st.warning("Algumas entradas na matriz de notas não eram finitas e foram ajustadas (NaN -> 0.5 onde apropriado)." )
+    scores_matrix = np.where(np.isfinite(scores_matrix), scores_matrix, 0.5)
+
+# If matrix is all zeros (happens se tudo faltou), set to 0.5 neutral to avoid blank tornado/zero ranking
+if np.allclose(scores_matrix, 0.0):
+    st.warning("Todas as notas normalizadas são zero — preenchendo com 0.5 (neutro) para permitir análises exploratórias. Recomendo preencher dados reais.")
+    scores_matrix[:] = 0.5
+
+# Show normalized matrix preview
 st.subheader("Matriz normalizada (0..1) — prévia")
 df_norm_preview = pd.DataFrame(scores_matrix, index=reactor_names, columns=criteria)
 st.dataframe(df_norm_preview.style.format("{:.3f}"))
 
 # ---------------------------
+# Deterministic ranking (safe)
+# ---------------------------
+# Ensure weights variable exists (if not yet elicited, make uniform placeholder)
+try:
+    _ = weights
+except NameError:
+    weights = np.ones(n_criteria) / float(n_criteria)
+    st.info("Pesos ainda não definidos: usando pesos uniformes temporariamente (sugestão: configure SAW ou AHP na seção de pesos)." )
+
+# guard against NaN in weights (e.g., AHP failed)
+if not np.isfinite(weights).all() or weights.sum() == 0:
+    st.warning("Pesos inválidos detectados; usando pesos uniformes como fallback.")
+    weights = np.ones(n_criteria) / float(n_criteria)
+
+# normalize weights strictly
+weights = np.array(weights, dtype=float)
+if weights.sum() <= 0:
+    weights = np.ones_like(weights) / len(weights)
+else:
+    weights = weights / weights.sum()
+
+scores = scores_matrix.dot(weights)
+# guard: if scores contain NaN/inf, replace with -inf for ranking
+scores = np.where(np.isfinite(scores), scores, -1e9)
+
+df_scores = pd.DataFrame({
+    "Reactor": reactor_names,
+    "Score": scores
+}).sort_values("Score", ascending=False)
+
+st.subheader("Ranqueamento (determinístico)")
+st.dataframe(df_scores.style.format({"Score":"{:.4f}"}))
 # Weight elicitation (AHP or SAW)
 # ---------------------------
 st.header("3) Elicitando pesos (AHP ou SAW)")
@@ -351,56 +436,26 @@ df_scores = pd.DataFrame({
 st.subheader("Ranqueamento (determinístico)")
 st.dataframe(df_scores.style.format({"Score":"{:.4f}"}))
 
-# ---------------------------
-# Monte Carlo (robusto contra NaN/Inf)
-# ---------------------------
+# Monte Carlo
 st.subheader("Análise probabilística (Monte Carlo)")
 mc_runs = st.number_input("Monte Carlo runs", min_value=100, max_value=20000, value=2000, step=100)
 noise_scale = st.slider("Incerteza nas notas (%)", min_value=0.0, max_value=0.5, value=0.10, step=0.01)
-
 if st.button("Rodar Monte Carlo"):
-    # 1) Verificar e tratar NaNs na matriz de notas (scores_matrix)
-    if np.isnan(scores_matrix).any():
-        st.warning("Foram detectados valores ausentes (NaN) na matriz de notas. Substituindo NaNs pela média da respectiva coluna antes de rodar a simulação.")
-        col_means = np.nanmean(scores_matrix, axis=0)
-        # substituir NaN na matriz por média da coluna
-        inds = np.where(np.isnan(scores_matrix))
-        for row_i, col_j in zip(*inds):
-            scores_matrix[row_i, col_j] = col_means[col_j]
-
-    # 2) Executar Monte Carlo com a matriz tratada
     with st.spinner("Executando Monte Carlo..."):
         mc_results = montecarlo_scores(scores_matrix, weights, n_runs=mc_runs, noise_scale=noise_scale)
-
-        # garantir que mc_results seja finito
-        if not np.isfinite(mc_results).all():
-            st.warning("Detecção: alguns resultados Monte Carlo não são finitos (NaN/Inf). Valores não finitos serão descartados nas análises subsequentes.")
-            mc_results = np.where(np.isfinite(mc_results), mc_results, np.nan)
-
-        winners = np.nanargmax(np.nan_to_num(mc_results, nan=-np.inf), axis=1)
+        winners = np.argmax(mc_results, axis=1)
         probs = [(winners==i).mean() for i in range(n_reactors)]
         df_prob = pd.DataFrame({"Reactor":reactor_names, "Prob_top1":probs}).sort_values("Prob_top1", ascending=False)
         st.write("Probabilidade de ser o melhor (Top-1) considerando incerteza nas notas")
         st.dataframe(df_prob.style.format({"Prob_top1":"{:.3%}"}))
-
-        # violin / histogram for top candidate — com checagem de finitude
-        top_idx = int(np.nanargmax(probs))
+        # violin / histogram for top candidate
+        top_idx = int(np.argmax(probs))
         st.markdown(f"Distribuição de pontuação do vencedor provável: **{reactor_names[top_idx]}**")
-        arr = mc_results[:, top_idx]
-        finite_mask = np.isfinite(arr)
-        n_valid = finite_mask.sum()
-        if n_valid == 0:
-            st.warning("Não há valores válidos (finito) para plotar o histograma do vencedor — verifique as entradas e pesos.")
-        else:
-            plt.figure(figsize=(6,3))
-            plt.hist(arr[finite_mask], bins=40)
-            plt.title(f"Histograma de scores (MC) — {reactor_names[top_idx]}")
-            plt.xlabel("Score")
-            plt.ylabel("Frequência")
-            st.pyplot(plt.gcf())
-            plt.clf()
-
-
+        plt.figure(figsize=(6,3))
+        plt.hist(mc_results[:, top_idx], bins=40)
+        plt.title(f"Histograma de scores (MC) — {reactor_names[top_idx]}")
+        st.pyplot(plt.gcf())
+        plt.clf()
 
 # ---------------------------
 # Sensitivity (tornado)
