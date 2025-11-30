@@ -1,474 +1,517 @@
-"""
-Streamlit App: MMR Decision Suite — SAW + AHP + Monte Carlo + FPSO Compatibility
-Author: Gerado pelo assistant a pedido do usuário
-Descrição: Ferramenta interativa para avaliação comparativa de Micro Modular Reactors (MMRs)
-          com:
-          - SAW (Simple Additive Weighting)
-          - AHP (Analytic Hierarchy Process) pairwise -> prioridades
-          - Monte Carlo para incerteza (probabilidade de ser top-1)
-          - Leitura de CSV com dados dos reatores (fallback para dataset interno)
-          - Cálculo automático de LCOE
-          - Verificações de compatibilidade básica com parâmetros de FPSO (deck, CG, guindaste, footprint)
-Como rodar:
-    pip install -r requirements.txt
-    streamlit run streamlit_app.py
-"""
+# streamlit_app.py
+# Streamlit app: MMR Offshore Decision Support (AHP + SAW + MonteCarlo + FPSO compatibility)
+# Author: gerado por ChatGPT sob pedido do usuário
+# Run: streamlit run streamlit_app.py
 
-from typing import List, Dict
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import json
+import matplotlib.pyplot as plt
+from scipy import linalg
+import io
+import base64
 
-st.set_page_config(page_title="MMR Decision Suite", layout="wide")
+st.set_page_config(layout="wide", page_title="MMR Offshore Selector", initial_sidebar_state="expanded")
 
-# -----------------------
-# Defaults: MMRs & dataset
-# -----------------------
+# ---------------------------
+# Constants / Defaults
+# ---------------------------
 MMRS = ['Oklo Aurora', 'U-Battery', 'eVinci', 'StarCore', 'HolosGen', 'USNC MMR', 'Kronos (PWR)', 'XAMR (HTGR)']
+DEFAULT_CRITERIA = ['Segurança', 'Custo-benefício', 'Volume compacto', 'Potência', 'Regulação', 'Massa total', 'CG sensitivity', 'Shield mass', 'Heat rejection', 'LCOE']
 
-DEFAULT_DATA = pd.DataFrame([
-    # Simple plausible example numbers for demonstration only. Units in column names.
-    # CAPEX in MUSD, OPEX in MUSD/year, CF fraction, Mass in tonnes, Shielding_mass in tonnes, Footprint in m2,
-    # Refuel interval in years, Crane required (t)
-    {'MMR': 'Oklo Aurora', 'Segurança': 8.5, 'Custo-benefício': 7.0, 'Volume compacto': 8.0, 'Potência': 6.0, 'Regulação': 5.5,
-     'CAPEX_MUSD': 40.0, 'OPEX_MUSD_per_year': 2.0, 'CF': 0.92, 'Mass_t': 85.0, 'Shielding_mass_t': 25.0, 'Footprint_m2': 80.0,
-     'Refuel_interval_yr': 15, 'Crane_req_t': 60},
-    {'MMR': 'U-Battery', 'Segurança': 7.0, 'Custo-benefício': 6.0, 'Volume compacto': 9.0, 'Potência': 2.5, 'Regulação': 6.0,
-     'CAPEX_MUSD': 15.0, 'OPEX_MUSD_per_year': 1.2, 'CF': 0.80, 'Mass_t': 40.0, 'Shielding_mass_t': 10.0, 'Footprint_m2': 40.0,
-     'Refuel_interval_yr': 8, 'Crane_req_t': 20},
-    {'MMR': 'eVinci', 'Segurança': 8.0, 'Custo-benefício': 6.8, 'Volume compacto': 6.0, 'Potência': 5.0, 'Regulação': 7.0,
-     'CAPEX_MUSD': 30.0, 'OPEX_MUSD_per_year': 1.5, 'CF': 0.90, 'Mass_t': 70.0, 'Shielding_mass_t': 20.0, 'Footprint_m2': 70.0,
-     'Refuel_interval_yr': 20, 'Crane_req_t': 40},
-    {'MMR': 'StarCore', 'Segurança': 6.5, 'Custo-benefício': 6.5, 'Volume compacto': 7.0, 'Potência': 4.0, 'Regulação': 5.0,
-     'CAPEX_MUSD': 22.0, 'OPEX_MUSD_per_year': 1.8, 'CF': 0.85, 'Mass_t': 60.0, 'Shielding_mass_t': 18.0, 'Footprint_m2': 65.0,
-     'Refuel_interval_yr': 10, 'Crane_req_t': 30},
-    {'MMR': 'HolosGen', 'Segurança': 8.2, 'Custo-benefício': 7.2, 'Volume compacto': 6.5, 'Potência': 6.5, 'Regulação': 6.8,
-     'CAPEX_MUSD': 45.0, 'OPEX_MUSD_per_year': 2.5, 'CF': 0.93, 'Mass_t': 95.0, 'Shielding_mass_t': 30.0, 'Footprint_m2': 95.0,
-     'Refuel_interval_yr': 12, 'Crane_req_t': 80},
-    {'MMR': 'USNC MMR', 'Segurança': 7.8, 'Custo-benefício': 7.0, 'Volume compacto': 7.5, 'Potência': 4.5, 'Regulação': 6.2,
-     'CAPEX_MUSD': 28.0, 'OPEX_MUSD_per_year': 1.6, 'CF': 0.88, 'Mass_t': 68.0, 'Shielding_mass_t': 17.0, 'Footprint_m2': 66.0,
-     'Refuel_interval_yr': 10, 'Crane_req_t': 35},
-    {'MMR': 'Kronos (PWR)', 'Segurança': 6.2, 'Custo-benefício': 5.5, 'Volume compacto': 5.0, 'Potência': 10.0, 'Regulação': 4.5,
-     'CAPEX_MUSD': 120.0, 'OPEX_MUSD_per_year': 6.0, 'CF': 0.95, 'Mass_t': 210.0, 'Shielding_mass_t': 80.0, 'Footprint_m2': 250.0,
-     'Refuel_interval_yr': 3, 'Crane_req_t': 200},
-    {'MMR': 'XAMR (HTGR)', 'Segurança': 9.0, 'Custo-benefício': 7.4, 'Volume compacto': 6.8, 'Potência': 7.0, 'Regulação': 6.5,
-     'CAPEX_MUSD': 55.0, 'OPEX_MUSD_per_year': 2.8, 'CF': 0.90, 'Mass_t': 110.0, 'Shielding_mass_t': 28.0, 'Footprint_m2': 110.0,
-     'Refuel_interval_yr': 12, 'Crane_req_t': 70},
-])
+# ---------------------------
+# Utils
+# ---------------------------
+def read_dataset(path="mmr_data.csv"):
+    """Read reactor dataset. Expect columns:
+    name, mmr, CAPEX, OPEX, P_rated_MW, CF, mass_kg, footprint_m2, shield_mass_kg, cg_m_from_ref, inertia_kgm2,
+    heat_rejection_kW, fuel_type, ref_source (URL), last_update (YYYY-MM-DD)
+    """
+    try:
+        df = pd.read_csv(path)
+        return df
+    except Exception as e:
+        # build sample skeleton if no file
+        cols = ["name","mmr","CAPEX","OPEX","P_rated_MW","CF","mass_kg","footprint_m2","shield_mass_kg",
+                "cg_m_from_ref","inertia_kgm2","heat_rejection_kW","fuel_type","ref_source","last_update"]
+        df = pd.DataFrame(columns=cols)
+        # populate with placeholders for the required mmrs
+        for m in MMRS:
+            df = df.append({"name":m,"mmr":m,"CAPEX":np.nan,"OPEX":np.nan,"P_rated_MW":np.nan,"CF":np.nan,
+                            "mass_kg":np.nan,"footprint_m2":np.nan,"shield_mass_kg":np.nan,"cg_m_from_ref":np.nan,
+                            "inertia_kgm2":np.nan,"heat_rejection_kW":np.nan,"fuel_type":"", "ref_source":"",
+                            "last_update":""}, ignore_index=True)
+        return df
 
-# -----------------------
-# Helper functions
-# -----------------------
-def compute_lcoe(capex_musd, opex_musd_per_year, cf, lifetime_yr=30, discount_rate=0.07, capacity_mwe=5.0):
-    """
-    Compute LCOE in $/MWh.
-    CAPEX in MUSD, OPEX in MUSD/yr, CF fraction, capacity in MWe.
-    Returns $/MWh
-    """
-    # convert MUSD to USD
-    capex = capex_musd * 1e6
-    opex = opex_musd_per_year * 1e6
-    r = discount_rate
-    n = lifetime_yr
-    if r == 0:
-        crf = 1 / n
+def save_df_to_csv(df, filename="mmr_data_out.csv"):
+    df.to_csv(filename, index=False)
+    return filename
+
+def normalize_series(s, method="minmax", benefit=True):
+    # benefit=True means higher is better; if false, invert after normalization
+    if method == "minmax":
+        mn, mx = np.nanmin(s), np.nanmax(s)
+        if np.isclose(mx, mn):
+            res = np.zeros_like(s, dtype=float)
+        else:
+            res = (s - mn) / (mx - mn)
+    elif method == "zscore":
+        mu = np.nanmean(s)
+        sigma = np.nanstd(s)
+        if np.isclose(sigma, 0):
+            res = np.zeros_like(s, dtype=float)
+        else:
+            res = (s - mu) / sigma
+            # put into 0..1 range
+            res = (res - np.nanmin(res)) / (np.nanmax(res) - np.nanmin(res) + 1e-12)
     else:
-        crf = (r * (1 + r) ** n) / ((1 + r) ** n - 1)
-    annualized_capex = capex * crf
-    annual_energy_mwh = capacity_mwe * cf * 8760.0
-    lcoe = (annualized_capex + opex) / annual_energy_mwh
+        # identity
+        res = (s - np.nanmin(s)) / (np.nanmax(s) - np.nanmin(s) + 1e-12)
+    if not benefit:
+        res = 1.0 - res
+    return res
+
+def compute_lcoe(capex, opex, prated_mw, cf, r=0.07, n=20):
+    # CAPEX [$], OPEX [$/yr], prated_mw [MW], CF [0-1]
+    if np.isnan(capex) or np.isnan(prated_mw) or np.isnan(cf) or prated_mw <=0 or cf<=0:
+        return np.nan
+    crf = (r*(1+r)**n)/((1+r)**n - 1)
+    annual_energy = prated_mw * 1e3 * cf * 8760.0  # MWh -> kWh? keep as kWh; we'll output $/MWh later
+    lcoe = (capex * crf + opex) / (annual_energy/1000.0)  # $/MWh
     return lcoe
 
-def minmax_normalize(series: pd.Series, higher_is_better=True):
-    a = series.min()
-    b = series.max()
-    if a == b:
-        return pd.Series(0.5, index=series.index)  # neutral
-    norm = (series - a) / (b - a)
-    return norm if higher_is_better else 1 - norm
-
-def ahp_priority_from_pairwise(A: np.ndarray):
+def ahp_weights_from_pairwise(A):
+    # A: numpy array (n,n) pairwise comparison matrix
     vals, vecs = np.linalg.eig(A)
     max_idx = np.argmax(vals.real)
-    priority = np.real(vecs[:, max_idx])
-    priority = np.abs(priority)
-    priority = priority / priority.sum()
-    # consistency check
-    lambda_max = np.real(vals[max_idx])
-    n = A.shape[0]
-    ci = (lambda_max - n) / (n - 1) if n > 1 else 0.0
-    # Random Index (RI) table for 1..10 (Saaty)
-    RI_dict = {1:0.00,2:0.00,3:0.58,4:0.90,5:1.12,6:1.24,7:1.32,8:1.41,9:1.45,10:1.49}
-    ri = RI_dict.get(n, 1.49)
-    cr = ci / ri if ri != 0 else 0.0
-    return priority, {'lambda_max': lambda_max, 'CI': ci, 'RI': ri, 'CR': cr}
+    w = vecs[:, max_idx].real
+    w = np.abs(w)
+    w = w / np.sum(w)
+    return w
 
-def compute_integrabilidade_offshore(row):
-    """
-    Example composite index (0..1) of Integrability Offshore (IIO).
-    Subfatores: massa, shielding, footprint, refuel frequency, crane requirement.
-    Each subfator normalized and combined with weights.
-    """
-    # lower mass, lower shielding, lower footprint, longer refuel (higher better), smaller crane requirement => better.
-    # We'll normalize using heuristic maximums from dataset or reasonable caps
-    # Use default maxima for normalization
-    mass = row['Mass_t']
-    shield = row['Shielding_mass_t']
-    footprint = row['Footprint_m2']
-    refuel = row['Refuel_interval_yr']
-    crane = row['Crane_req_t']
-    # maxima (tunable)
-    mass_max = 250.0
-    shield_max = 100.0
-    footprint_max = 300.0
-    refuel_max = 25.0
-    crane_max = 250.0
-    f_mass = 1 - min(mass / mass_max, 1.0)
-    f_shield = 1 - min(shield / shield_max, 1.0)
-    f_foot = 1 - min(footprint / footprint_max, 1.0)
-    f_refuel = min(refuel / refuel_max, 1.0)
-    f_crane = 1 - min(crane / crane_max, 1.0)
-    # weights
-    w = {'mass': 0.25, 'shield': 0.25, 'foot':0.20, 'refuel':0.2, 'crane':0.1}
-    iio = w['mass']*f_mass + w['shield']*f_shield + w['foot']*f_foot + w['refuel']*f_refuel + w['crane']*f_crane
-    return iio
+def create_pairwise_matrix(n, ui_values=None):
+    # ui_values: upper triangular entries from user in matrix form or None
+    # default identity
+    A = np.ones((n,n))
+    if ui_values is not None:
+        # ui_values a dict with (i,j): val for i<j
+        for (i,j),v in ui_values.items():
+            A[i,j] = v
+            A[j,i] = 1.0/v if v !=0 else 1.0
+    return A
 
-def perform_saw(df, criteria_cols, weights):
-    """
-    df: dataframe containing criteria numeric columns (already normalized 0..1)
-    weights: dict mapping criterion -> weight (sums to 1)
-    returns series of final scores
-    """
-    w = np.array([weights[c] for c in criteria_cols])
-    mat = df[criteria_cols].values.astype(float)
-    scores = mat.dot(w)
-    return pd.Series(scores, index=df.index)
+def montecarlo_scores(scores_matrix, weights, n_runs=2000, noise_scale=0.10):
+    # scores_matrix: reactors x criteria scaled 0..1
+    n_reactors, n_criteria = scores_matrix.shape
+    results = np.zeros((n_runs, n_reactors))
+    for k in range(n_runs):
+        noise = np.random.normal(1.0, noise_scale, scores_matrix.shape)
+        noisy = np.clip(scores_matrix * noise, 0.0, 1.0)
+        results[k,:] = noisy.dot(weights)
+    return results
 
-def monte_carlo_ranking(df_scores_matrix, n_runs=2000, noise_pct=0.10):
-    """
-    df_scores_matrix: (n_reactors x n_criteria) original normalized scores in 0..1
-    noise_pct: relative noise applied to each criterion per run
-    returns: probabilities of being top-1 for each reactor
-    """
-    n_reactors = df_scores_matrix.shape[0]
-    n_criteria = df_scores_matrix.shape[1]
-    scores = df_scores_matrix.values
-    winners = np.zeros(n_reactors, dtype=int)
-    for _ in range(n_runs):
-        # multiplicative noise per element
-        noise = np.random.normal(1.0, noise_pct, scores.shape)
-        noisy = scores * noise
-        # simple equal weights across criteria for the noisy check or we can re-use provided weights externally.
-        # For the Monte Carlo we will compute the weighted sum using the base column weights passed separately by caller.
-        # Here we simply return the noisy matrix for caller to use with weights.
-        # We'll implement a wrapper above; this function can be extended per need.
-        # To keep this function general, just collect noisy matrices
-        pass
-    # not used directly; wrapper below implements Monte Carlo with weights
-    return None
-
-def monte_carlo_with_weights(df_norm, criteria_cols, weights_array, n_runs=5000, noise_pct=0.10):
-    """
-    df_norm: dataframe with normalized criteria (0..1)
-    criteria_cols: ordered list of criteria
-    weights_array: numpy array of weights aligned with criteria_cols summing to 1
-    Returns: probabilities of top-1 and distribution of scores (summary)
-    """
-    n_reactors = df_norm.shape[0]
-    scores_store = np.zeros((n_runs, n_reactors))
-    base = df_norm[criteria_cols].values.astype(float)
-    for i in range(n_runs):
-        noise = np.random.normal(1.0, noise_pct, base.shape)
-        noisy = base * noise
-        final = noisy.dot(weights_array)
-        scores_store[i, :] = final
-    winners = np.argmax(scores_store, axis=1)
-    probs = [(winners == j).mean() for j in range(n_reactors)]
-    mean_scores = scores_store.mean(axis=0)
-    std_scores = scores_store.std(axis=0)
-    return {'probs': probs, 'mean': mean_scores, 'std': std_scores, 'winners': winners}
-
-# -----------------------
-# UI start
-# -----------------------
-st.title("MMR Decision Suite — SAW + AHP + Monte Carlo + FPSO Checker")
-st.write("Ferramenta para apoio à decisão sobre adoção de Micro Modular Reactors (MMRs) embarcados em FPSO.")
-st.write("Use o menu lateral para carregar dados, ajustar pesos e realizar análises. (Prototipo técnico — não substituir estudos de engenharia.)")
-
-# -----------------------
-# Sidebar: CSV upload and config
-# -----------------------
-st.sidebar.header("Input Data / Config")
-
-uploaded = st.sidebar.file_uploader("Upload CSV de dados dos MMRs (colunas: see README)", type=['csv'])
-if uploaded is not None:
-    try:
-        df = pd.read_csv(uploaded)
-        st.sidebar.success("CSV carregado.")
-    except Exception as e:
-        st.sidebar.error(f"Falha ao ler CSV: {e}")
-        df = DEFAULT_DATA.copy()
-else:
-    df = DEFAULT_DATA.copy()
-
-# Ensure MMR column exists
-if 'MMR' not in df.columns:
-    st.error("CSV inválido: falta coluna 'MMR'. Usando dataset interno.")
-    df = DEFAULT_DATA.copy()
-
-df = df.copy()
-df = df.set_index('MMR')
-
-# Add computed LCOE and IIO if not present
-if 'LCOE_USD_per_MWh' not in df.columns:
-    # default capacity_mwe: infer from 'Potência' column if present (Potência in MW)
-    capacity_est = df.get('Potência', pd.Series(5.0, index=df.index)).astype(float)
-    # if potência values look like 10 for Kronos, we interpret as MW. If absent, default 5 MWe.
-    lcoes = []
-    for idx, row in df.iterrows():
-        capex = float(row.get('CAPEX_MUSD', 30.0))
-        opex = float(row.get('OPEX_MUSD_per_year', 2.0))
-        cf = float(row.get('CF', 0.85))
-        # capacity guess: try 'Potência' else default 5 MWe
-        cap_mwe = float(row.get('Potência', capacity_est.get(idx, 5.0)))
-        # Prevent zero or absurd values
-        if cap_mwe <= 0:
-            cap_mwe = 5.0
-        lcoe = compute_lcoe(capex, opex, cf, lifetime_yr=30, discount_rate=0.07, capacity_mwe=cap_mwe)
-        lcoes.append(lcoe)
-    df['LCOE_USD_per_MWh'] = lcoes
-
-if 'IIO' not in df.columns:
-    df['IIO'] = df.apply(lambda r: compute_integrabilidade_offshore(r), axis=1)
-
-# Criteria list: original plus added quantitative ones (user requested expansion allowed)
-criteria = ['Segurança', 'Custo-benefício', 'Volume compacto', 'Potência', 'Regulação', 'LCOE', 'IIO']
-# Mark which criteria are benefit (higher better) or cost (lower better)
-benefit_flags = {
-    'Segurança': True,
-    'Custo-benefício': True,
-    'Volume compacto': True,
-    'Potência': True,
-    'Regulação': True,
-    'LCOE': False,  # lower LCOE is better
-    'IIO': True
-}
-
-st.sidebar.subheader("Critérios (expandido)")
-st.sidebar.write("Critérios usados internamente: " + ", ".join(criteria))
-
-# -----------------------
-# Weighting method selection
-# -----------------------
-method = st.sidebar.selectbox("Método de priorização", ["SAW (Weighted Sum)", "AHP (pairwise)"])
-st.sidebar.markdown("Monte Carlo adiciona incerteza às notas/entradas e retorna probabilidade de cada MMR ser ranking #1.")
-
-# -----------------------
-# Weights: either sliders (SAW) or AHP pairwise input
-# -----------------------
-st.sidebar.markdown("### Pesos por critério")
-if method == "SAW (Weighted Sum)":
-    user_weights = {}
-    total = 0.0
-    for c in criteria:
-        w = st.sidebar.slider(f"Peso: {c}", 0.0, 5.0, 1.0, 0.1)
-        user_weights[c] = float(w)
-        total += w
-    if total == 0:
-        st.sidebar.warning("Soma dos pesos é zero — serão usados pesos iguais.")
-        norm_weights = {c: 1.0/len(criteria) for c in criteria}
-    else:
-        norm_weights = {c: float(user_weights[c]/total) for c in criteria}
-else:
-    # AHP: pairwise matrix creation UI
-    st.sidebar.write("Preencha a matriz de comparações pareadas (Saaty scale). Valores >1: linha mais importante que coluna. Recíproco automatic.")
-    n = len(criteria)
-    # initialize matrix identity
-    A = np.ones((n, n))
-    # We'll store values in session state to persist across reruns
-    if 'ahp_vals' not in st.session_state:
-        st.session_state['ahp_vals'] = [[1.0]*n for _ in range(n)]
-    # Build grid of number_inputs
+def tornado_sensitivity(base_weights, scores_matrix, delta=0.10):
+    # For each criterion vary weight +/- delta (redistribute remaining proportionally) and compute winner change
+    n = len(base_weights)
+    base_scores = scores_matrix.dot(base_weights)
+    base_rank = np.argsort(-base_scores)
+    impacts = []
     for i in range(n):
-        cols = st.sidebar.columns(3)
-        # We will render per-row compressed to avoid huge UI; show as text inputs inline
-        pass
-    st.sidebar.markdown("Atenção: mantenha reciprocidade. Se editar (i,j) você deve inserir 1/value em (j,i) manualmente por ora.")
-    st.sidebar.write("Como atalho, você pode usar a matriz simétrica default (igual importância):")
-    if st.sidebar.button("Usar matriz identidade (igual importância)"):
-        A = np.eye(n)
-    else:
-        # Default equal
-        A = np.ones((n, n))
-    priority_vec, ahp_info = ahp_priority_from_pairwise(A)
-    # Map priorities to criteria
-    norm_weights = {criteria[i]: float(priority_vec[i]) for i in range(n)}
-    st.sidebar.write("Prioridades AHP (autovetor):")
-    for i, c in enumerate(criteria):
-        st.sidebar.write(f"- {c}: {norm_weights[c]:.3f}")
-    st.sidebar.write(f"Consistency Ratio (CR): {ahp_info['CR']:.3f} (CI={ahp_info['CI']:.3f})")
-    if ahp_info['CR'] > 0.1:
-        st.sidebar.warning("CR > 0.1 — julgamentos inconsistentes. Recomenda-se revisar a matriz pareada.")
+        w_up = base_weights.copy()
+        w_down = base_weights.copy()
+        # add delta proportion of total to criterion i and remove proportionally from others
+        add = delta * base_weights.sum()
+        # simpler: scale i by (1+delta) then renormalize
+        w_up[i] *= (1+delta)
+        w_up = w_up / w_up.sum()
+        w_down[i] *= (1-delta)
+        w_down = w_down / w_down.sum()
+        score_up = scores_matrix.dot(w_up)
+        score_down = scores_matrix.dot(w_down)
+        impacts.append({
+            "criterion_index": i,
+            "score_change_up": (score_up - base_scores).mean(),
+            "score_change_down": (score_down - base_scores).mean(),
+            "max_delta": max(np.abs(score_up - base_scores).max(), np.abs(score_down - base_scores).max())
+        })
+    return impacts
 
-# -----------------------
-# Show dataset summary
-# -----------------------
-st.subheader("Dataset: MMRs (visual)")
-st.dataframe(df.style.format({c: "{:.3f}" for c in df.columns if df[c].dtype != object}))
+# ---------------------------
+# Load Data
+# ---------------------------
+st.sidebar.title("MMR Offshore Selector")
+st.sidebar.markdown("Carregue um CSV com dados dos MMRs (ex.: `mmr_data.csv`) com colunas técnicas. Se não, um template será criado automaticamente.")
 
-# -----------------------
-# Normalization per criterion
-# -----------------------
-st.subheader("Normalização das métricas por critério")
-norm_df = pd.DataFrame(index=df.index)
-for c in criteria:
-    if c not in df.columns:
-        # If missing, fill with neutral values
-        norm_df[c] = 0.5
-        continue
-    series = df[c].astype(float)
-    hi_better = benefit_flags.get(c, True)
-    norm_df[c] = minmax_normalize(series, higher_is_better=hi_better)
-
-st.dataframe(norm_df.style.format("{:.3f}"))
-
-# -----------------------
-# SAW scoring
-# -----------------------
-st.subheader("SAW: Pontuação ponderada (resultado determinístico)")
-# Ensure weights sum to 1
-weights_arr = np.array([norm_weights[c] for c in criteria])
-# small normalization
-if weights_arr.sum() == 0:
-    weights_arr = np.ones_like(weights_arr) / len(weights_arr)
+uploaded = st.sidebar.file_uploader("Upload CSV de MMRs (opcional)", type=["csv"])
+if uploaded:
+    df_mmr = pd.read_csv(uploaded)
 else:
-    weights_arr = weights_arr / weights_arr.sum()
-weights_map = {c: weights_arr[i] for i, c in enumerate(criteria)}
+    df_mmr = read_dataset()  # placeholder skeleton
 
-scores = perform_saw(norm_df, criteria, weights_map)
-results = pd.DataFrame({
-    'MMR': norm_df.index,
-    'Score': scores
-}).set_index('MMR')
-results = results.join(df[['LCOE_USD_per_MWh', 'Mass_t', 'Shielding_mass_t', 'Footprint_m2', 'Crane_req_t']], how='left')
+st.sidebar.markdown("### Escolha método de decisão")
+method = st.sidebar.selectbox("Método", ["SAW (Weighted Sum)", "AHP (Pairwise)"])
 
-results = results.sort_values('Score', ascending=False)
-st.dataframe(results.style.format({'Score': "{:.4f}", 'LCOE_USD_per_MWh':"{:.2f}"}))
+# criteria management
+st.sidebar.markdown("### Critérios (revise/adicione)")
+criteria = st.sidebar.multiselect("Selecione critérios", options=list(df_mmr.columns)+DEFAULT_CRITERIA, default=DEFAULT_CRITERIA)
+if not criteria:
+    st.sidebar.error("Selecione ao menos um critério.")
+    st.stop()
 
-st.markdown("**Top 3 (determinístico)**")
-for i, (idx, row) in enumerate(results.head(3).iterrows(), 1):
-    st.write(f"{i}. **{idx}** — Score: {row['Score']:.4f} — LCOE: ${row['LCOE_USD_per_MWh']:.1f}/MWh — Mass: {row['Mass_t']} t")
+# allow user to provide numeric vectors for criteria or use computed (e.g., LCOE)
+# compute derived fields (LCOE)
+if 'CAPEX' in df_mmr.columns and 'OPEX' in df_mmr.columns and 'P_rated_MW' in df_mmr.columns and 'CF' in df_mmr.columns:
+    df_mmr['LCOE_$perMWh'] = df_mmr.apply(lambda r: compute_lcoe(r.get('CAPEX', np.nan), r.get('OPEX', np.nan), r.get('P_rated_MW', np.nan), r.get('CF', np.nan)), axis=1)
+else:
+    df_mmr['LCOE_$perMWh'] = np.nan
 
-# -----------------------
-# Radar chart for top N
-# -----------------------
-st.subheader("Radar — Top 4 (normalizado 0..1)")
-topn = results.head(4).index.tolist()
-fig = go.Figure()
-for mmr in topn:
-    values = norm_df.loc[mmr, criteria].tolist()
-    fig.add_trace(go.Scatterpolar(
-        r=values + [values[0]],
-        theta=criteria + [criteria[0]],
-        fill='toself',
-        name=mmr
-    ))
-fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0,1])), showlegend=True)
-st.plotly_chart(fig, use_container_width=True)
+# Display dataset and allow editing of key numeric fields inline
+st.header("1) Dados dos MMRs (fonte e último update obrigatório)")
+st.markdown("Cada reator deve ter `ref_source` (URL/PDF) e `last_update` para garantir rastreabilidade das notas.")
 
-# -----------------------
-# Monte Carlo probabilistic ranking
-# -----------------------
-st.subheader("Monte Carlo — Probabilidade de ser top-1 (incerteza)")
-mc_runs = st.slider("Número de simulações Monte Carlo", 200, 20000, 2000, step=200)
-noise_pct = st.slider("Ruído relativo por critério (std, ex 0.10 = 10%)", 0.01, 0.30, 0.10, step=0.01)
-mc_res = monte_carlo_with_weights(norm_df, criteria, np.array([weights_map[c] for c in criteria]), n_runs=mc_runs, noise_pct=noise_pct)
+with st.expander("Ver / editar dados de reatores"):
+    edited = st.experimental_data_editor(df_mmr, num_rows="dynamic")
+    df_mmr = edited
 
-probs = mc_res['probs']
-mc_table = pd.DataFrame({
-    'MMR': norm_df.index,
-    'Prob_top1': probs,
-    'MeanScore': mc_res['mean'],
-    'StdScore': mc_res['std']
-}).set_index('MMR').sort_values('Prob_top1', ascending=False)
-st.dataframe(mc_table.style.format({'Prob_top1':"{:.3f}", 'MeanScore':"{:.4f}", 'StdScore':"{:.4f}"}))
+# Build the score matrix (reactors x criteria)
+reactor_names = df_mmr['name'].fillna(df_mmr['mmr']).tolist()
+n_reactors = len(reactor_names)
+n_criteria = len(criteria)
 
-st.markdown("**Probabilidades de ser #1 (ordenado)**")
-for idx, row in mc_table.head(3).iterrows():
-    st.write(f"- {idx}: Probabilidade {row['Prob_top1']:.2%} — Score médio {row['MeanScore']:.3f} ± {row['StdScore']:.3f}")
+# prepare numeric matrix; if column exists numeric, use it; else ask user to input subjective scores
+scores_matrix = np.zeros((n_reactors, n_criteria))
+metric_info = []
 
-# -----------------------
-# FPSO compatibility checker (I/O spec and checks)
-# -----------------------
-st.subheader("FPSO Compatibility Checker — Verificações básicas (heurísticas)")
-st.write("Informe parâmetros do FPSO para checagem rápida de compatibilidade (isto é um *pré*-filtro; engenharia naval requerida).")
+st.header("2) Defina notas / métricas por critério")
+cols_input = st.columns(2)
+for j, c in enumerate(criteria):
+    with cols_input[j % 2]:
+        st.subheader(c)
+        # if c corresponds to a numeric column in df_mmr, we will use that (and allow normalization)
+        if c in df_mmr.columns:
+            series = pd.to_numeric(df_mmr[c], errors='coerce').values.astype(float)
+            st.write("Dados detectados para critério '{}', valores extraídos da coluna.".format(c))
+            # user chooses if this is benefit (higher better) or cost (lower better)
+            benefit = st.checkbox(f"'{c}' é benefício (maior é melhor)?", value=True, key=f"benefit_{j}")
+            norm_method = st.selectbox(f"Normalização '{c}'", options=["minmax","zscore"], index=0, key=f"norm_{j}")
+            normed = normalize_series(series, method=norm_method, benefit=benefit)
+            scores_matrix[:, j] = normed
+            metric_info.append((c, True, norm_method))
+        else:
+            # ask user for subjective scores 0..10
+            st.write("Crie notas subjetivas (0..10) para cada reator para o critério '{}'.".format(c))
+            subj = []
+            for i, rname in enumerate(reactor_names):
+                default = 5
+                val = st.number_input(f"{rname} — {c}", min_value=0.0, max_value=10.0, value=float(default), step=0.5, key=f"{j}_{i}")
+                subj.append(val)
+            subj = np.array(subj, dtype=float)
+            normed = normalize_series(subj, method="minmax", benefit=True)  # assume benefit
+            scores_matrix[:, j] = normed
+            metric_info.append((c, False, "subjective_0_10"))
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    deck_capacity_t = st.number_input("Deck available capacity (toneladas)", min_value=10.0, value=300.0, step=10.0)
-    allowable_cg_shift_m = st.number_input("Allowable CG shift (m)", min_value=0.1, value=0.5, step=0.1)
-with col2:
-    crane_capacity_t = st.number_input("Crane capacity (t)", min_value=5.0, value=150.0, step=5.0)
-    footprint_capacity_m2 = st.number_input("Available topside footprint (m2)", min_value=10.0, value=800.0, step=10.0)
-with col3:
-    electrical_interface_mwe = st.number_input("Electrical interface required (MWe available)", min_value=0.1, value=20.0, step=0.1)
-    note = st.text_input("Ops notes / constraints", value="Separação física mínima entre nuclear e hydrocarbons recomendada.")
+# LCOE special handling: if present, ensure treated as cost (lower better)
+if 'LCOE_$perMWh' in criteria:
+    idx = criteria.index('LCOE_$perMWh')
+    # ensure it's cost
+    # already normalized above; if it was raw column, we re-normalize as cost
+    if 'LCOE_$perMWh' in df_mmr.columns:
+        series = pd.to_numeric(df_mmr['LCOE_$perMWh'], errors='coerce').values.astype(float)
+        scores_matrix[:, idx] = normalize_series(series, method="minmax", benefit=False)
+        metric_info[idx] = ('LCOE_$perMWh', True, 'minmax_cost')
 
-# Compute simple checks
-compat_rows = []
-for mmr in df.index:
-    mass = float(df.loc[mmr].get('Mass_t', 0.0))
-    shield = float(df.loc[mmr].get('Shielding_mass_t', 0.0))
-    footprint = float(df.loc[mmr].get('Footprint_m2', 0.0))
-    crane_req = float(df.loc[mmr].get('Crane_req_t', 0.0))
-    # simple CG shift estimate (heuristic): shielding mass located off center ~ produces CG shift proportional
-    cg_shift_est = min(allowable_cg_shift_m * (shield / (deck_capacity_t*0.2)), allowable_cg_shift_m*2)  # heuristic cap
-    reasons = []
-    ok = True
-    if mass > deck_capacity_t:
-        ok = False
-        reasons.append(f"Mass ({mass}t) > deck capacity ({deck_capacity_t}t)")
-    if shield > deck_capacity_t * 0.5:
-        ok = False
-        reasons.append(f"Shielding mass ({shield}t) > 50% deck capacity -> structural risk")
-    if crane_req > crane_capacity_t:
-        ok = False
-        reasons.append(f"Crane required ({crane_req}t) > crane capacity ({crane_capacity_t}t)")
-    if footprint > footprint_capacity_m2:
-        ok = False
-        reasons.append(f"Footprint ({footprint} m2) > available footprint ({footprint_capacity_m2} m2)")
-    # electrical check: ensure at least reactor capacity < electrical interface available * 1.1 buffer
-    reactor_capacity = float(df.loc[mmr].get('Potência', 5.0))
-    if reactor_capacity > electrical_interface_mwe * 1.05:
-        ok = False
-        reasons.append(f"Reactor rated power ({reactor_capacity} MWe) > electrical interface available ({electrical_interface_mwe} MWe)")
+# Show normalized matrix summary
+st.subheader("Matriz normalizada (0..1) — prévia")
+df_norm_preview = pd.DataFrame(scores_matrix, index=reactor_names, columns=criteria)
+st.dataframe(df_norm_preview.style.format("{:.3f}"))
 
-    compat_rows.append({'MMR': mmr, 'OK': ok, 'CG_shift_est_m': cg_shift_est, 'Issues': "; ".join(reasons) if reasons else "OK"})
+# ---------------------------
+# Weight elicitation (AHP or SAW)
+# ---------------------------
+st.header("3) Elicitando pesos (AHP ou SAW)")
+if method == "SAW (Weighted Sum)":
+    st.markdown("Use sliders para definir pesos e pressione 'Normalizar pesos' para obter soma = 1.")
+    weights = []
+    w_cols = st.columns(len(criteria))
+    for j, c in enumerate(criteria):
+        with w_cols[j]:
+            w = st.slider(f"Peso — {c}", min_value=0.0, max_value=5.0, value=1.0, step=0.1, key=f"w_{j}")
+            weights.append(w)
+    weights = np.array(weights, dtype=float)
+    if weights.sum() == 0:
+        st.warning("A soma dos pesos é zero; pesos iguais serão usados.")
+        weights = np.ones_like(weights)
+    weights = weights / weights.sum()
+    st.write("Pesos normalizados:", {c: float(weights[i]) for i,c in enumerate(criteria)})
 
-compat_df = pd.DataFrame(compat_rows).set_index('MMR').sort_values('OK', ascending=False)
-st.dataframe(compat_df.style.format({'CG_shift_est_m':"{:.3f}"}))
+else:
+    st.markdown("AHP — insira as comparações pareadas (i vs j). Valor >1 indica i > j.")
+    n = len(criteria)
+    st.write("Forneça valores de comparação para pares (i,j). Ex.: 1,3,5,7,9 escala de Saaty ou frações.")
+    # we present a compressed UI: a table upper-triangular inputs
+    pair_vals = {}
+    for i in range(n):
+        for j in range(i+1, n):
+            default = 1.0
+            val = st.number_input(f"{criteria[i]}  ÷  {criteria[j]}", min_value=1e-6, max_value=1e6, value=float(default), step=0.1, key=f"pair_{i}_{j}")
+            pair_vals[(i,j)] = float(val)
+    A = create_pairwise_matrix(n, ui_values=pair_vals)
+    try:
+        w = ahp_weights_from_pairwise(A)
+        weights = w
+        st.write("Pesos (autovetor) normalizados (AHP):")
+        st.write({criteria[i]: float(weights[i]) for i in range(len(criteria))})
+        # consistency check (CR) basic: compute lambda_max
+        vals, vecs = np.linalg.eig(A)
+        lambda_max = max(vals.real)
+        n = A.shape[0]
+        ci = (lambda_max - n)/(n-1) if n>1 else 0.0
+        # Saaty random index (approx for n<=10)
+        RI_dict = {1:0.00,2:0.00,3:0.58,4:0.90,5:1.12,6:1.24,7:1.32,8:1.41,9:1.45,10:1.49}
+        ri = RI_dict.get(n, 1.49)
+        cr = ci/ri if ri>0 else 0.0
+        st.write(f"Índice de Consistência (CR) ≈ {cr:.3f}. (CR < 0.10 geralmente aceitável)")
+    except Exception as e:
+        st.error("Erro ao calcular pesos AHP: " + str(e))
+        st.stop()
 
-st.markdown("**Observação**: Esses checks são **heurísticos** e servem apenas como *filtro inicial*. Requer-se análise estrutural (FEA), estabilidade (GM), e estudos de vibração e impacto em topsides por equipe naval/estaleiro.")
+# ---------------------------
+# Deterministic ranking
+# ---------------------------
+st.header("4) Ranqueamento determinístico e probabilístico")
 
-# -----------------------
-# Export / Save options
-# -----------------------
-st.subheader("Export / Save")
-if st.button("Exportar resultados (CSV)"):
-    out_df = results.join(pd.DataFrame({'Prob_top1': mc_table['Prob_top1']}), how='left')
-    csv = out_df.to_csv()
-    st.download_button("Download CSV com scores e probabilidades", data=csv, file_name="mmr_scores_results.csv", mime="text/csv")
+scores = scores_matrix.dot(weights)
+df_scores = pd.DataFrame({
+    "Reactor": reactor_names,
+    "Score": scores
+}).sort_values("Score", ascending=False)
+st.subheader("Ranqueamento (determinístico)")
+st.dataframe(df_scores.style.format({"Score":"{:.4f}"}))
 
-# -----------------------
-# Footer: Notes & metadata
-# -----------------------
-st.info("Este aplicativo é uma ferramenta de apoio técnico exploratória. Decisões finais de engenharia e licenciamento requerem estudos dedicados, modelagem FEA, avaliações regulatórias e validação por especialistas nucleares e navais.")
+# Monte Carlo
+st.subheader("Análise probabilística (Monte Carlo)")
+mc_runs = st.number_input("Monte Carlo runs", min_value=100, max_value=20000, value=2000, step=100)
+noise_scale = st.slider("Incerteza nas notas (%)", min_value=0.0, max_value=0.5, value=0.10, step=0.01)
+if st.button("Rodar Monte Carlo"):
+    with st.spinner("Executando Monte Carlo..."):
+        mc_results = montecarlo_scores(scores_matrix, weights, n_runs=mc_runs, noise_scale=noise_scale)
+        winners = np.argmax(mc_results, axis=1)
+        probs = [(winners==i).mean() for i in range(n_reactors)]
+        df_prob = pd.DataFrame({"Reactor":reactor_names, "Prob_top1":probs}).sort_values("Prob_top1", ascending=False)
+        st.write("Probabilidade de ser o melhor (Top-1) considerando incerteza nas notas")
+        st.dataframe(df_prob.style.format({"Prob_top1":"{:.3%}"}))
+        # violin / histogram for top candidate
+        top_idx = int(np.argmax(probs))
+        st.markdown(f"Distribuição de pontuação do vencedor provável: **{reactor_names[top_idx]}**")
+        plt.figure(figsize=(6,3))
+        plt.hist(mc_results[:, top_idx], bins=40)
+        plt.title(f"Histograma de scores (MC) — {reactor_names[top_idx]}")
+        st.pyplot(plt.gcf())
+        plt.clf()
+
+# ---------------------------
+# Sensitivity (tornado)
+# ---------------------------
+st.header("5) Análise de sensibilidade (tornado / elasticidade)")
+delta_pct = st.slider("Variação para sensibilidade (%)", min_value=1, max_value=50, value=10, step=1)
+impacts = tornado_sensitivity(weights, scores_matrix, delta=delta_pct/100.0)
+# prepare tornado dataframe
+tornado_df = []
+for it in impacts:
+    idx = it['criterion_index']
+    tornado_df.append({
+        "criterion": criteria[idx],
+        "max_delta": it['max_delta'],
+        "mean_change_up": it['score_change_up'],
+        "mean_change_down": it['score_change_down']
+    })
+tornado_df = pd.DataFrame(tornado_df).sort_values("max_delta", ascending=False)
+st.subheader("Tornado — critérios mais sensíveis")
+st.dataframe(tornado_df.style.format({"max_delta":"{:.6f}", "mean_change_up":"{:.6f}", "mean_change_down":"{:.6f}"}))
+
+# plot tornado bars
+fig, ax = plt.subplots(figsize=(8, max(3, len(criteria)*0.4)))
+y = tornado_df['criterion']
+x = tornado_df['max_delta']
+ax.barh(y, x)
+ax.set_xlabel("Impacto máximo médio no score")
+ax.set_title(f"Tornado (variação ±{delta_pct}%)")
+st.pyplot(fig)
+
+# Elasticidade LCOE: if LCOE present
+if 'LCOE_$perMWh' in criteria:
+    idx_lcoe = criteria.index('LCOE_$perMWh')
+    orig = scores_matrix[:, idx_lcoe].copy()
+    # increase LCOE by +10% (i.e., worsen)
+    # since LCOE already normalized as cost (higher worse), increasing raw LCOE reduces normalized score; but for elasticities we approximate by perturbing the normalized column
+    pert = orig * 1.10
+    pert = np.clip(pert, 0, 1)
+    scores_pert = scores_matrix.copy()
+    scores_pert[:, idx_lcoe] = pert
+    new_scores = scores_pert.dot(weights)
+    elasticity = (new_scores - scores).mean() / (0.10)  # per 10% change
+    st.subheader("Elasticidade média da LCOE (variação +10%)")
+    st.write(f"Média de mudança no score por +10% LCOE (normalizado): {elasticity:.6f}")
+
+# ---------------------------
+# FPSO compatibility module (engineering outputs)
+# ---------------------------
+st.header("6) Módulo de compatibilidade FPSO (massa, CG, GM, deck capacity checks)")
+st.markdown("Forneça propriedades do topside / deck do FPSO para verificação.")
+
+fpsodeck = {}
+fpsodeck['deck_capacity_kg'] = st.number_input("Deck allowable distributed mass (kg)", value=2_000_000.0, step=10000.0)
+fpsodeck['deck_point_capacity_kg'] = st.number_input("Deck allowable point load (kg)", value=200_000.0, step=1000.0)
+fpsodeck['crane_capacity_kg'] = st.number_input("Crane capacity (kg)", value=50_000.0, step=1000.0)
+fpsodeck['allowable_cg_shift_m'] = st.number_input("Allowable CG shift (m)", value=0.5, step=0.01)
+fpsodeck['metacentric_height_m'] = st.number_input("GM metacentric height baseline (m)", value=1.0, step=0.01)
+fpsodeck['deck_area_m2'] = st.number_input("Deck area (m^2)", value=500.0, step=1.0)
+
+# compute compatibility: mass total, including shield
+out_rows = []
+for i, r in df_mmr.iterrows():
+    name = r.get('name') or r.get('mmr')
+    mass = float(r.get('mass_kg') if not pd.isna(r.get('mass_kg')) else 0.0)
+    shield = float(r.get('shield_mass_kg') if not pd.isna(r.get('shield_mass_kg')) else 0.0)
+    total_mass = mass + shield
+    cg = float(r.get('cg_m_from_ref') if not pd.isna(r.get('cg_m_from_ref')) else 0.0)
+    inertia = float(r.get('inertia_kgm2') if not pd.isna(r.get('inertia_kgm2')) else 0.0)
+    # approximate CG shift: assume installation changes CG proportionally to (total_mass / deck_capacity) * cg
+    cg_shift = cg * (total_mass / max(1.0, fpsodeck['deck_capacity_kg']))
+    # approximate GM new: GM_new = GM_old - delta where delta ~ cg_shift * (total_mass / (1e6)) (rough linear heuristic)
+    gm_new = fpsodeck['metacentric_height_m'] - cg_shift * (total_mass / 1e6)
+    deck_ok = total_mass <= fpsodeck['deck_capacity_kg']
+    point_ok = total_mass <= fpsodeck['deck_point_capacity_kg']
+    crane_ok = total_mass <= fpsodeck['crane_capacity_kg']
+    out_rows.append({
+        "Reactor": name,
+        "mass_kg": total_mass,
+        "cg_shift_m": cg_shift,
+        "GM_new_m_est": gm_new,
+        "deck_OK": deck_ok,
+        "point_load_OK": point_ok,
+        "crane_OK": crane_ok,
+        "heat_rejection_kW": float(r.get('heat_rejection_kW') if not pd.isna(r.get('heat_rejection_kW')) else 0.0),
+        "notes_sources": r.get('ref_source', "")
+    })
+
+df_fspo = pd.DataFrame(out_rows)
+st.dataframe(df_fspo.style.format({"mass_kg":"{:.0f}", "cg_shift_m":"{:.4f}", "GM_new_m_est":"{:.4f}"}))
+
+# Flagging critical issues
+st.subheader("Flags de incompatibilidade física (automáticas)")
+flags = []
+for i, row in df_fspo.iterrows():
+    issues = []
+    if not row['deck_OK']:
+        issues.append("Deck capacity exceeded")
+    if not row['point_load_OK']:
+        issues.append("Point load exceeded")
+    if not row['crane_OK']:
+        issues.append("Crane cannot lift")
+    if row['GM_new_m_est'] < 0.2:
+        issues.append("Estimated GM too low -> estabilidade insuficiente")
+    flags.append({"Reactor": row['Reactor'], "Issues": "; ".join(issues) if issues else "OK"})
+st.dataframe(pd.DataFrame(flags))
+
+# Export engineering CSV for FEA/CAD integration
+if st.button("Exportar relatório técnico (CSV) para engenheiros navais"):
+    outname = "mmr_fspo_compatibility_report.csv"
+    df_fspo.to_csv(outname, index=False)
+    st.success(f"Arquivo gerado: {outname}. Faça download a partir do diretório do app.")
+
+# ---------------------------
+# Regulatory checklist & licensing scoring
+# ---------------------------
+st.header("7) Checklist regulatório por jurisdição (CNEN / ANTAQ / IMO / Port Authority)")
+st.markdown("Referências oficiais carregadas automaticamente (quando possível). Consulte links de referência no README.")
+# Simple scoring model: for each reactor compute 'licenciability_score' based on: known fuel constraints, transport complexity, size, shielding, and documented pre-licensing progress
+def compute_licensing_score(row):
+    score = 0.0
+    # fuel: HALEU increases complexity (penalty)
+    fuel = str(row.get('fuel_type','')).lower()
+    if 'haleu' in fuel:
+        score -= 0.2
+    if 'triso' in fuel or 'htgr' in fuel:
+        score += 0.1
+    # if ref_source present add trust
+    if row.get('ref_source'):
+        score += 0.2
+    # if mass small -> easier
+    mass = row.get('mass_kg',0.0)
+    if mass < 50000:
+        score += 0.2
+    elif mass < 200000:
+        score += 0.1
+    # if shielding massive, penalty
+    if row.get('shield_mass_kg',0.0) > 100000:
+        score -= 0.2
+    # clamp between 0 and 1
+    s = min(1.0, max(0.0, 0.5 + score))
+    return s
+
+licscores = []
+for i, r in df_mmr.iterrows():
+    lscore = compute_licensing_score(r)
+    # rough time estimate months: lower score -> longer
+    eta_months = int((1.0 - lscore) * 36 + 6)  # between 6 and ~42 months
+    lproba = lscore
+    lrefs = r.get('ref_source','')
+    lrow = {"Reactor": r.get('name', r.get('mmr')), "lic_score": lscore, "est_months": eta_months, "prob_success": lproba, "refs": lrefs}
+    licscores.append(lrow)
+
+df_lic = pd.DataFrame(licscores).sort_values("lic_score", ascending=False)
+st.dataframe(df_lic.style.format({"lic_score":"{:.3f}", "prob_success":"{:.3%}"}))
+
+# ---------------------------
+# Risks and mitigations
+# ---------------------------
+st.header("8) Riscos específicos e recomendações mitigatórias (automático)")
+st.markdown("O sistema sumariza riscos chave e recomendações a partir das entradas; revise e acrescente ações locais.")
+
+# Generate automatic recommendations based on flags and fuel types
+recs = []
+for i, r in df_mmr.iterrows():
+    name = r.get('name', r.get('mmr'))
+    issues = []
+    if r.get('heat_rejection_kW',0.0) > 5000:
+        issues.append("Alto requisito de rejeição térmica -> implementar loop intermediário e heat exchangers de alta eficiência (evitar seawater primário).")
+    fuel = str(r.get('fuel_type','')).lower()
+    if 'haleu' in fuel:
+        issues.append("HALEU: negociar logística de fornecimento e transporte com autoridades e verificar capacidade de armazenagem segura onshore.")
+    if r.get('shield_mass_kg',0.0) > 100000:
+        issues.append("Shield mass elevado: avaliar reforço de deck e possibilidade de reduzir shield com materiais avançados ou aumentar afastamento/layers.")
+    if pd.isna(r.get('ref_source')) or r.get('ref_source','')=='':
+        issues.append("Sem fontes/datasheets: requer coleta de dados e verificação documental (não use para decisão final).")
+    if not issues:
+        issues.append("Nenhuma mitigação automática detectada; validar planos operacionais e P&Ps locais.")
+    recs.append({"Reactor": name, "Mitigations": " ; ".join(issues)})
+st.dataframe(pd.DataFrame(recs))
+
+# ---------------------------
+# Export full decision report (minimal HTML)
+# ---------------------------
+st.header("9) Exportar relatório resumido (HTML)")
+def generate_html_report(df_scores, df_fspo, df_lic):
+    html = "<html><head><meta charset='utf-8'><title>MMR Offshore Decision Report</title></head><body>"
+    html += "<h1>MMR Offshore Decision Report</h1>"
+    html += "<h2>Ranqueamento determinístico</h2>"
+    html += df_scores.to_html(index=False)
+    html += "<h2>FPSO compatibility</h2>"
+    html += df_fspo.to_html(index=False)
+    html += "<h2>Licensing scores</h2>"
+    html += df_lic.to_html(index=False)
+    html += "<p>Gerado por MMR Offshore Selector</p>"
+    html += "</body></html>"
+    return html
+
+if st.button("Gerar relatório HTML"):
+    html = generate_html_report(df_scores, df_fspo, df_lic)
+    b = html.encode('utf-8')
+    b64 = base64.b64encode(b).decode()
+    href = f'<a href="data:text/html;base64,{b64}" download="mmr_offshore_report.html">Download relatório HTML</a>'
+    st.markdown(href, unsafe_allow_html=True)
 
 st.markdown("---")
-st.markdown("### Notas rápidas para engenheiros")
-st.markdown("""
-- AHP implementado com autovetor e verificação de consistência (CR).
-- LCOE calculado com CRF (30 anos, 7% taxa por defeito) — parâmetros ajustáveis no código.
-- IIO é um índice composto heurístico para integração offshore; ajustar pesos conforme sua política técnica.
-""")
+st.markdown("Referências / fontes públicas (exemplos): CNEN normas e transporte; IAEA SMR siting guidance; IMO nuclear & SOLAS/IMDG; fabricantes Oklo, Westinghouse (eVinci), USNC, X-energy. Consulte README para links e instruções detalhadas.")
