@@ -351,26 +351,56 @@ df_scores = pd.DataFrame({
 st.subheader("Ranqueamento (determinístico)")
 st.dataframe(df_scores.style.format({"Score":"{:.4f}"}))
 
-# Monte Carlo
+# ---------------------------
+# Monte Carlo (robusto contra NaN/Inf)
+# ---------------------------
 st.subheader("Análise probabilística (Monte Carlo)")
 mc_runs = st.number_input("Monte Carlo runs", min_value=100, max_value=20000, value=2000, step=100)
 noise_scale = st.slider("Incerteza nas notas (%)", min_value=0.0, max_value=0.5, value=0.10, step=0.01)
+
 if st.button("Rodar Monte Carlo"):
+    # 1) Verificar e tratar NaNs na matriz de notas (scores_matrix)
+    if np.isnan(scores_matrix).any():
+        st.warning("Foram detectados valores ausentes (NaN) na matriz de notas. Substituindo NaNs pela média da respectiva coluna antes de rodar a simulação.")
+        col_means = np.nanmean(scores_matrix, axis=0)
+        # substituir NaN na matriz por média da coluna
+        inds = np.where(np.isnan(scores_matrix))
+        for row_i, col_j in zip(*inds):
+            scores_matrix[row_i, col_j] = col_means[col_j]
+
+    # 2) Executar Monte Carlo com a matriz tratada
     with st.spinner("Executando Monte Carlo..."):
         mc_results = montecarlo_scores(scores_matrix, weights, n_runs=mc_runs, noise_scale=noise_scale)
-        winners = np.argmax(mc_results, axis=1)
+
+        # garantir que mc_results seja finito
+        if not np.isfinite(mc_results).all():
+            st.warning("Detecção: alguns resultados Monte Carlo não são finitos (NaN/Inf). Valores não finitos serão descartados nas análises subsequentes.")
+            mc_results = np.where(np.isfinite(mc_results), mc_results, np.nan)
+
+        winners = np.nanargmax(np.nan_to_num(mc_results, nan=-np.inf), axis=1)
         probs = [(winners==i).mean() for i in range(n_reactors)]
         df_prob = pd.DataFrame({"Reactor":reactor_names, "Prob_top1":probs}).sort_values("Prob_top1", ascending=False)
         st.write("Probabilidade de ser o melhor (Top-1) considerando incerteza nas notas")
         st.dataframe(df_prob.style.format({"Prob_top1":"{:.3%}"}))
-        # violin / histogram for top candidate
-        top_idx = int(np.argmax(probs))
+
+        # violin / histogram for top candidate — com checagem de finitude
+        top_idx = int(np.nanargmax(probs))
         st.markdown(f"Distribuição de pontuação do vencedor provável: **{reactor_names[top_idx]}**")
-        plt.figure(figsize=(6,3))
-        plt.hist(mc_results[:, top_idx], bins=40)
-        plt.title(f"Histograma de scores (MC) — {reactor_names[top_idx]}")
-        st.pyplot(plt.gcf())
-        plt.clf()
+        arr = mc_results[:, top_idx]
+        finite_mask = np.isfinite(arr)
+        n_valid = finite_mask.sum()
+        if n_valid == 0:
+            st.warning("Não há valores válidos (finito) para plotar o histograma do vencedor — verifique as entradas e pesos.")
+        else:
+            plt.figure(figsize=(6,3))
+            plt.hist(arr[finite_mask], bins=40)
+            plt.title(f"Histograma de scores (MC) — {reactor_names[top_idx]}")
+            plt.xlabel("Score")
+            plt.ylabel("Frequência")
+            st.pyplot(plt.gcf())
+            plt.clf()
+
+
 
 # ---------------------------
 # Sensitivity (tornado)
