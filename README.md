@@ -1,4 +1,4 @@
-# Nuclear Microreactor Calculator
+# Nuclear Micro Modular Reactor Calculator
 
 A simple nuclear modular microreactor strategic decision-making calculator written during the participation in the 2025 Brazilian Nuclear Olympics (Olimpíadas Nucleares Brasileiras (ONB) 2025 – Hackapower) addressing the energy theme.
 
