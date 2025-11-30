@@ -195,9 +195,46 @@ else:
 st.header("1) Dados dos MMRs (fonte e último update obrigatório)")
 st.markdown("Cada reator deve ter `ref_source` (URL/PDF) e `last_update` para garantir rastreabilidade das notas.")
 
+# -------------------------
+# Editable dataset UI (compatível com várias versões do Streamlit)
+# -------------------------
 with st.expander("Ver / editar dados de reatores"):
-    edited = st.experimental_data_editor(df_mmr, num_rows="dynamic")
-    df_mmr = edited
+    # Prefer st.data_editor (API estável nas versões recentes)
+    try:
+        if hasattr(st, "data_editor"):
+            # st.data_editor returns a DataFrame when editable by user
+            edited = st.data_editor(df_mmr, num_rows="dynamic")
+            df_mmr = pd.DataFrame(edited)
+        elif hasattr(st, "experimental_data_editor"):
+            # fallback para versões onde a API é experimental
+            edited = st.experimental_data_editor(df_mmr, num_rows="dynamic")
+            df_mmr = pd.DataFrame(edited)
+        else:
+            # Fallback manual: criar inputs por célula (menos elegante, mas compatível)
+            st.warning("Seu Streamlit não possui data_editor integrado — usando editor manual de células. Recomendo atualizar o Streamlit para a versão mais recente.")
+            rows = []
+            for i, row in df_mmr.iterrows():
+                st.markdown(f"**Reator {i+1}: {row.get('name') or row.get('mmr','(sem nome)')}**")
+                new_row = {}
+                for col in df_mmr.columns:
+                    val = row[col]
+                    if pd.api.types.is_numeric_dtype(df_mmr[col]) or (isinstance(val, (int, float, np.floating, np.integer))):
+                        new_val = st.number_input(f"{col} (linha {i+1})", value=float(val) if not pd.isna(val) else 0.0, key=f"manual_{i}_{col}")
+                    else:
+                        new_val = st.text_input(f"{col} (linha {i+1})", value=str(val) if not pd.isna(val) else "", key=f"manual_{i}_{col}")
+                    new_row[col] = new_val
+                rows.append(new_row)
+            # reconstruir df_mmr
+            try:
+                df_mmr = pd.DataFrame(rows, columns=df_mmr.columns)
+            except Exception:
+                # se algo falhar ao reconstruir, manter o original
+                st.error("Erro ao reconstruir DataFrame a partir do editor manual; mantendo dados originais.")
+    except Exception as e:
+        st.error(f"Erro ao abrir editor de dados: {e}")
+        st.write("Mostrando DataFrame apenas para visualização (não editável).")
+        st.dataframe(df_mmr)
+
 
 # Build the score matrix (reactors x criteria)
 reactor_names = df_mmr['name'].fillna(df_mmr['mmr']).tolist()
