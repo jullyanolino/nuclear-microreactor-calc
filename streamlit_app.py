@@ -9,7 +9,7 @@ st.set_page_config(page_title="Seleção de MMR Offshore", layout="wide")
 st.title("⚛️ Seletor Interativo de Micro Reatores Modulares (MMRs) Offshore")
 
 st.markdown("""
-Calculadora de comparação de MMRs para embarque em plataformas marítimas usando **Multicritérios Ponderados (Weighted Multi-criteria -SAW)**.
+Calculadora de comparação de MMRs para embarque em plataformas marítimas usando **Multicritérios Ponderados (Simple Additive Weighting- SAW)**.
 Altere os pesos dos critérios abaixo e veja o novo ranking dos reatores!
 """)
 
