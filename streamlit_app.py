@@ -27,22 +27,47 @@ def read_dataset(path="mmr_data.csv"):
     """Read reactor dataset. Expect columns:
     name, mmr, CAPEX, OPEX, P_rated_MW, CF, mass_kg, footprint_m2, shield_mass_kg, cg_m_from_ref, inertia_kgm2,
     heat_rejection_kW, fuel_type, ref_source (URL), last_update (YYYY-MM-DD)
+
+    If the file is not present, return a template DataFrame with one row per MMRS.
     """
-    try:
-        df = pd.read_csv(path)
-        return df
-    except Exception as e:
-        # build sample skeleton if no file
-        cols = ["name","mmr","CAPEX","OPEX","P_rated_MW","CF","mass_kg","footprint_m2","shield_mass_kg",
-                "cg_m_from_ref","inertia_kgm2","heat_rejection_kW","fuel_type","ref_source","last_update"]
-        df = pd.DataFrame(columns=cols)
-        # populate with placeholders for the required mmrs
-        for m in MMRS:
-            df = df.append({"name":m,"mmr":m,"CAPEX":np.nan,"OPEX":np.nan,"P_rated_MW":np.nan,"CF":np.nan,
-                            "mass_kg":np.nan,"footprint_m2":np.nan,"shield_mass_kg":np.nan,"cg_m_from_ref":np.nan,
-                            "inertia_kgm2":np.nan,"heat_rejection_kW":np.nan,"fuel_type":"", "ref_source":"",
-                            "last_update":""}, ignore_index=True)
-        return df
+    import os
+    cols = ["name","mmr","CAPEX","OPEX","P_rated_MW","CF","mass_kg","footprint_m2","shield_mass_kg",
+            "cg_m_from_ref","inertia_kgm2","heat_rejection_kW","fuel_type","ref_source","last_update"]
+
+    if os.path.isfile(path):
+        try:
+            df = pd.read_csv(path)
+            # ensure all expected columns exist
+            for c in cols:
+                if c not in df.columns:
+                    df[c] = np.nan
+            return df[cols]
+        except Exception as e:
+            st.warning(f"Erro ao ler '{path}': {e}. Gerando template vazio.")
+    # create template skeleton
+    rows = []
+    for m in MMRS:
+        rows.append({
+            "name": m,
+            "mmr": m,
+            "CAPEX": np.nan,
+            "OPEX": np.nan,
+            "P_rated_MW": np.nan,
+            "CF": np.nan,
+            "mass_kg": np.nan,
+            "footprint_m2": np.nan,
+            "shield_mass_kg": np.nan,
+            "cg_m_from_ref": np.nan,
+            "inertia_kgm2": np.nan,
+            "heat_rejection_kW": np.nan,
+            "fuel_type": "",
+            "ref_source": "",
+            "last_update": ""
+        })
+    df = pd.DataFrame(rows, columns=cols)
+    return df
+
+
 
 def save_df_to_csv(df, filename="mmr_data_out.csv"):
     df.to_csv(filename, index=False)
